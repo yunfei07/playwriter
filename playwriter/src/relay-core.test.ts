@@ -2,6 +2,8 @@ import { createMCPClient } from './mcp-client.js'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { getCDPSessionForPage } from './cdp-session.js'
 import { getCdpUrl } from './utils.js'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   setupTestContext,
   cleanupTestContext,
@@ -134,6 +136,43 @@ describe('Relay Core Tests', () => {
         `)
     expect(result.content).toBeDefined()
   }, 30000)
+
+  it('should export python regression tests from recorded steps', async () => {
+    const outDir = path.join(process.cwd(), 'tmp', 'mcp-python-export')
+    fs.rmSync(outDir, { recursive: true, force: true })
+
+    await client.callTool({
+      name: 'execute',
+      arguments: {
+        code: js`
+          testBuilder.start({ name: 'example domain smoke', baseUrl: 'https://example.com' });
+          testBuilder.step({ action: 'goto', url: '/' });
+          testBuilder.step({ action: 'click', locator: 'a' });
+          testBuilder.assert({ type: 'url', expectedUrl: 'https://www.iana.org/help/example-domains' });
+        `,
+      },
+    })
+
+    const exportResult = await client.callTool({
+      name: 'export_python_test',
+      arguments: {
+        outDir,
+        testName: 'example-domain-smoke',
+      },
+    })
+
+    const exportText = exportResult.content?.[0]?.type === 'text' ? exportResult.content[0].text : ''
+    expect(exportText).toContain('Python regression test exported.')
+    expect(exportText).toContain('testName: example-domain-smoke')
+
+    const generatedPath = path.join(outDir, 'tests', 'test_example_domain_smoke.py')
+    expect(fs.existsSync(generatedPath)).toBe(true)
+
+    const generated = fs.readFileSync(generatedPath, 'utf-8')
+    expect(generated).toContain('def test_example_domain_smoke()')
+    expect(generated).toContain("page.goto('https://example.com/')")
+    expect(generated).toContain("expect(page).to_have_url('https://www.iana.org/help/example-domains')")
+  }, 60000)
 
   it('should show extension as connected for pages created via newPage()', async () => {
     const browserContext = getBrowserContext()

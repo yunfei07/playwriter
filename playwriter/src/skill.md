@@ -171,6 +171,104 @@ You can collaborate with the user - they can help with captchas, difficult eleme
 
 **Important:** `state` is **session-isolated** but pages are **shared** across all sessions. See "working with pages" for how to avoid interference.
 
+## exporting python regression tests
+
+Playwriter can export recorded steps as runnable **pytest + Playwright sync API** tests. This export is **explicit**: it only happens when you call the export tool/command.
+
+1. Start a scenario and record meaningful actions/assertions:
+
+```js
+testBuilder.start({ name: 'checkout smoke', baseUrl: 'https://example.com' })
+testBuilder.step({ action: 'goto', url: '/checkout' })
+testBuilder.step({ action: 'fill', locator: '#email', value: 'qa@example.com' })
+testBuilder.step({ action: 'click', locator: 'button[type="submit"]' })
+testBuilder.assert({ type: 'url', expectedUrl: 'https://example.com/thank-you' })
+```
+
+2. Export from MCP:
+
+```txt
+tool: export_python_test
+arguments: { outDir: "./generated-regression", testName: "checkout-smoke" }
+```
+
+3. Or export from CLI:
+
+```bash
+playwriter test export -s 1 --out-dir ./generated-regression --test-name checkout-smoke
+```
+
+Generated project includes:
+
+- `tests/test_<name>.py`
+- `requirements.txt`
+- `README.md` with setup/run instructions
+
+### batch json testcases (10 per batch, one file per case)
+
+For large suites (for example 10,000 cases), use JSON batching:
+
+```json
+{
+  "cases": [
+    {
+      "id": "google_openclaw_001",
+      "name": "google search openclaw",
+      "baseUrl": "https://www.google.com",
+      "steps": [
+        { "action": "goto", "url": "/" },
+        { "action": "fill", "locator": "textarea[name='q']", "value": "openclaw" },
+        { "action": "press", "locator": "textarea[name='q']", "key": "Enter" },
+        { "action": "assert-visible", "locator": "a[href*='openclaw']" }
+      ]
+    }
+  ]
+}
+```
+
+Supported `steps[].action` values:
+- `goto`, `click`, `fill`, `press`, `check`, `uncheck`, `select`
+- `assert-url`, `assert-visible`, `assert-text`
+
+CLI batch run:
+
+```bash
+playwriter test run-json -s 1 --json-path ./cases/order.json --batch-size 10 --batch-index 0 --out-dir ./generated-regression
+```
+
+MCP batch run:
+
+```txt
+tool: run_json_testcase_batch
+arguments: { jsonPath: "./cases/order.json", batchSize: 10, batchIndex: 0, outDir: "./generated-regression" }
+```
+
+Configure defaults once in MCP session (so you don't repeat args every time):
+
+```txt
+tool: configure_json_testcase_batch_defaults
+arguments: { jsonPath: "./cases/order.json", batchSize: 10, outDir: "./generated-regression", batchIndex: 0 }
+```
+
+Then run next batches with only index:
+
+```txt
+tool: run_json_testcase_batch
+arguments: { batchIndex: 1 }
+```
+
+Output layout (grouped by JSON filename):
+
+```text
+generated-regression/
+  order/
+    README.md
+    requirements.txt
+    tests/
+      test_<case_id>.py
+      ...
+```
+
 ## rules
 
 - **Initialize state.page first**: see "working with pages" — at the start of a task, assign `state.page` (reuse `about:blank` or create one) and use `state.page` for all automation steps.

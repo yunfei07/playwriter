@@ -248,6 +248,37 @@ describe('Security Tests', () => {
     const queryOk = await fetch(`http://127.0.0.1:${TEST_PORT}/cli/sessions?token=${secretToken}`)
     expect(queryOk.status).toBe(200)
 
+    // Token enforcement also applies to newly added /cli/test/export.
+    const exportNoToken = await httpRequest({
+      path: '/cli/test/export',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(exportNoToken.status).toBe(401)
+
+    const exportWithToken = await httpRequest({
+      path: '/cli/test/export',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secretToken}` },
+    })
+    // Session doesn't exist in this test, but middleware should allow it.
+    expect(exportWithToken.status).toBe(404)
+
+    const runJsonNoToken = await httpRequest({
+      path: '/cli/test/run-json',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    expect(runJsonNoToken.status).toBe(401)
+
+    const runJsonWithToken = await httpRequest({
+      path: '/cli/test/run-json',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secretToken}` },
+    })
+    // Middleware allows request; endpoint rejects missing jsonPath payload.
+    expect(runJsonWithToken.status).toBe(400)
+
     // Token also enforced on /recording/*
     const recordingNoToken = await httpRequest({
       path: '/recording/status',

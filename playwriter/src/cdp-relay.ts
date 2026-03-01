@@ -1757,6 +1757,110 @@ export async function startPlayWriterCDPRelayServer({
     }
   })
 
+  app.post('/cli/test/export', async (c) => {
+    try {
+      const body = (await c.req.json()) as {
+        sessionId: string | number
+        outDir?: string
+        testName?: string
+      }
+      const sessionId = normalizeSessionId(body.sessionId)
+
+      if (!sessionId) {
+        return c.json({ error: 'sessionId is required' }, 400)
+      }
+
+      if (body.outDir !== undefined && typeof body.outDir !== 'string') {
+        return c.json({ error: 'outDir must be a string when provided' }, 400)
+      }
+
+      if (body.testName !== undefined && typeof body.testName !== 'string') {
+        return c.json({ error: 'testName must be a string when provided' }, 400)
+      }
+
+      const manager = await getExecutorManager()
+      const existingExecutor = manager.getSession(sessionId)
+      if (!existingExecutor) {
+        return c.json({ error: `Session ${sessionId} not found. Run 'playwriter session new' first.` }, 404)
+      }
+
+      const exported = existingExecutor.exportPythonTest({
+        outDir: body.outDir,
+        testName: body.testName,
+      })
+
+      return c.json({
+        success: true,
+        ...exported,
+      })
+    } catch (error: any) {
+      logger?.error('Export python test endpoint error:', error)
+      const message = error?.message || String(error)
+      const status = message.startsWith('Cannot export test:') ? 400 : 500
+      return c.json({ error: message }, status)
+    }
+  })
+
+  app.post('/cli/test/run-json', async (c) => {
+    try {
+      const body = (await c.req.json()) as {
+        sessionId: string | number
+        jsonPath?: string
+        outDir?: string
+        batchSize?: number
+        batchIndex?: number
+      }
+      const sessionId = normalizeSessionId(body.sessionId)
+
+      if (!sessionId) {
+        return c.json({ error: 'sessionId is required' }, 400)
+      }
+
+      if (!body.jsonPath || typeof body.jsonPath !== 'string') {
+        return c.json({ error: 'jsonPath is required and must be a string' }, 400)
+      }
+
+      if (body.outDir !== undefined && typeof body.outDir !== 'string') {
+        return c.json({ error: 'outDir must be a string when provided' }, 400)
+      }
+
+      if (body.batchSize !== undefined && (!Number.isInteger(body.batchSize) || body.batchSize <= 0)) {
+        return c.json({ error: 'batchSize must be a positive integer when provided' }, 400)
+      }
+
+      if (body.batchIndex !== undefined && (!Number.isInteger(body.batchIndex) || body.batchIndex < 0)) {
+        return c.json({ error: 'batchIndex must be an integer >= 0 when provided' }, 400)
+      }
+
+      const manager = await getExecutorManager()
+      const existingExecutor = manager.getSession(sessionId)
+      if (!existingExecutor) {
+        return c.json({ error: `Session ${sessionId} not found. Run 'playwriter session new' first.` }, 404)
+      }
+
+      const result = await existingExecutor.runJsonTestcaseBatch({
+        jsonPath: body.jsonPath,
+        outDir: body.outDir,
+        batchSize: body.batchSize,
+        batchIndex: body.batchIndex,
+      })
+
+      return c.json({
+        success: true,
+        ...result,
+      })
+    } catch (error: any) {
+      logger?.error('Run json testcase batch endpoint error:', error)
+      const message = error?.message || String(error)
+      const isClientError =
+        message.startsWith('Invalid testcase file') ||
+        message.includes('jsonPath is required') ||
+        message.includes('batchSize') ||
+        message.includes('batchIndex')
+      return c.json({ error: message }, isClientError ? 400 : 500)
+    }
+  })
+
   app.get('/cli/sessions', async (c) => {
     const manager = await getExecutorManager()
     return c.json({ sessions: manager.listSessions() })

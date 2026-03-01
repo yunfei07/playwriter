@@ -203,6 +203,209 @@ async function executeCode(options: {
   }
 }
 
+async function exportPythonTest(options: {
+  sessionId?: string
+  outDir?: string
+  testName?: string
+  host?: string
+  token?: string
+}): Promise<void> {
+  const sessionId = options.sessionId ? String(options.sessionId) : process.env.PLAYWRITER_SESSION
+  if (!sessionId) {
+    console.error('Error: -s/--session is required.')
+    console.error('Always run `playwriter session new` first to get a session ID to use.')
+    process.exit(1)
+  }
+
+  if (!options.host && !process.env.PLAYWRITER_HOST) {
+    await ensureRelayServer({ logger: console, env: cliRelayEnv })
+  }
+
+  const serverUrl = await getServerUrl(options.host)
+  const exportUrl = `${serverUrl}/cli/test/export`
+
+  try {
+    const response = await fetch(exportUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.token || process.env.PLAYWRITER_TOKEN
+          ? { Authorization: `Bearer ${options.token || process.env.PLAYWRITER_TOKEN}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        sessionId,
+        outDir: options.outDir,
+        testName: options.testName,
+      }),
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      console.error(`Error: ${response.status} ${text}`)
+      process.exit(1)
+    }
+
+    const result = (await response.json()) as {
+      success: boolean
+      outDir: string
+      testFilePath: string
+      requirementsPath: string
+      readmePath: string
+      stepCount: number
+      scenarioName: string
+      testName: string
+    }
+
+    if (!result.success) {
+      console.error('Error: export failed')
+      process.exit(1)
+    }
+
+    console.log('Python regression test exported:')
+    console.log(`  outDir: ${result.outDir}`)
+    console.log(`  testFilePath: ${result.testFilePath}`)
+    console.log(`  requirementsPath: ${result.requirementsPath}`)
+    console.log(`  readmePath: ${result.readmePath}`)
+    console.log(`  stepCount: ${result.stepCount}`)
+    console.log(`  scenarioName: ${result.scenarioName}`)
+    console.log(`  testName: ${result.testName}`)
+  } catch (error: any) {
+    if (error.cause?.code === 'ECONNREFUSED') {
+      console.error('Error: Cannot connect to relay server.')
+      console.error('The Playwriter relay server should start automatically. Check logs at:')
+      console.error(`  ${LOG_FILE_PATH}`)
+    } else {
+      console.error(`Error: ${error.message}`)
+    }
+    process.exit(1)
+  }
+}
+
+async function runJsonTestcaseBatch(options: {
+  sessionId?: string
+  jsonPath: string
+  outDir?: string
+  batchSize?: number
+  batchIndex?: number
+  host?: string
+  token?: string
+}): Promise<void> {
+  const sessionId = options.sessionId ? String(options.sessionId) : process.env.PLAYWRITER_SESSION
+  if (!sessionId) {
+    console.error('Error: -s/--session is required.')
+    console.error('Always run `playwriter session new` first to get a session ID to use.')
+    process.exit(1)
+  }
+
+  if (!options.jsonPath || !options.jsonPath.trim()) {
+    console.error('Error: --json-path is required.')
+    process.exit(1)
+  }
+
+  const batchSize = options.batchSize ?? 10
+  const batchIndex = options.batchIndex ?? 0
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    console.error('Error: --batch-size must be a positive integer.')
+    process.exit(1)
+  }
+  if (!Number.isInteger(batchIndex) || batchIndex < 0) {
+    console.error('Error: --batch-index must be an integer >= 0.')
+    process.exit(1)
+  }
+
+  if (!options.host && !process.env.PLAYWRITER_HOST) {
+    await ensureRelayServer({ logger: console, env: cliRelayEnv })
+  }
+
+  const serverUrl = await getServerUrl(options.host)
+  const runJsonUrl = `${serverUrl}/cli/test/run-json`
+
+  try {
+    const response = await fetch(runJsonUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.token || process.env.PLAYWRITER_TOKEN
+          ? { Authorization: `Bearer ${options.token || process.env.PLAYWRITER_TOKEN}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        sessionId,
+        jsonPath: options.jsonPath,
+        outDir: options.outDir,
+        batchSize,
+        batchIndex,
+      }),
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      console.error(`Error: ${response.status} ${text}`)
+      process.exit(1)
+    }
+
+    const result = (await response.json()) as {
+      success: boolean
+      jsonPath: string
+      outDir: string
+      batchSize: number
+      batchIndex: number
+      batchStartIndex: number
+      totalCases: number
+      processedCases: number
+      passedCases: number
+      failedCases: number
+      results: Array<{
+        caseIndex: number
+        caseId: string | null
+        caseName: string | null
+        testName: string
+        status: 'passed' | 'failed'
+        stepCount: number
+        testFilePath: string | null
+        error: string | null
+      }>
+    }
+
+    if (!result.success) {
+      console.error('Error: run-json failed')
+      process.exit(1)
+    }
+
+    console.log('JSON testcase batch finished:')
+    console.log(`  jsonPath: ${result.jsonPath}`)
+    console.log(`  outDir: ${result.outDir}`)
+    console.log(`  batchIndex: ${result.batchIndex}`)
+    console.log(`  batchSize: ${result.batchSize}`)
+    console.log(`  batchStartIndex: ${result.batchStartIndex}`)
+    console.log(`  totalCases: ${result.totalCases}`)
+    console.log(`  processedCases: ${result.processedCases}`)
+    console.log(`  passedCases: ${result.passedCases}`)
+    console.log(`  failedCases: ${result.failedCases}`)
+    if (result.results.length > 0) {
+      console.log('  results:')
+      for (const item of result.results) {
+        const caseLabel = item.caseId || item.caseName || `case-${item.caseIndex + 1}`
+        if (item.status === 'passed') {
+          console.log(`    [PASS] #${item.caseIndex + 1} ${caseLabel} -> ${item.testFilePath}`)
+          continue
+        }
+        console.log(`    [FAIL] #${item.caseIndex + 1} ${caseLabel} -> ${item.error}`)
+      }
+    }
+  } catch (error: any) {
+    if (error.cause?.code === 'ECONNREFUSED') {
+      console.error('Error: Cannot connect to relay server.')
+      console.error('The Playwriter relay server should start automatically. Check logs at:')
+      console.error(`  ${LOG_FILE_PATH}`)
+    } else {
+      console.error(`Error: ${error.message}`)
+    }
+    process.exit(1)
+  }
+}
+
 // Session management commands
 cli
   .command('session new', 'Create a new session and print the session ID')
@@ -445,6 +648,58 @@ cli
       process.exit(1)
     }
   })
+
+cli
+  .command('test export', 'Export recorded steps as a runnable pytest + Playwright (sync API) project')
+  .option('--host <host>', 'Remote relay server host')
+  .option('--token <token>', 'Authentication token (or use PLAYWRITER_TOKEN env var)')
+  .option('-s, --session <name>', 'Session ID (required, or set PLAYWRITER_SESSION)')
+  .option('--out-dir <dir>', 'Output directory (default: ./generated-regression)')
+  .option('--test-name <name>', 'Test name used for file and function naming')
+  .action(
+    async (options: { host?: string; token?: string; session?: string; outDir?: string; testName?: string }) => {
+      await exportPythonTest({
+        sessionId: options.session,
+        outDir: options.outDir,
+        testName: options.testName,
+        host: options.host,
+        token: options.token,
+      })
+    },
+  )
+
+cli
+  .command('test run-json', 'Run a JSON testcase batch and export one Python script per testcase')
+  .option('--host <host>', 'Remote relay server host')
+  .option('--token <token>', 'Authentication token (or use PLAYWRITER_TOKEN env var)')
+  .option('-s, --session <name>', 'Session ID (required, or set PLAYWRITER_SESSION)')
+  .option('--json-path <path>', 'JSON testcase file path')
+  .option('--out-dir <dir>', 'Output root directory (default: ./generated-regression)')
+  .option('--batch-size <size>', 'Batch size (default: 10)', { default: 10 })
+  .option('--batch-index <index>', 'Zero-based batch index (default: 0)', { default: 0 })
+  .action(
+    async (options: {
+      host?: string
+      token?: string
+      session?: string
+      jsonPath?: string
+      outDir?: string
+      batchSize?: number | string
+      batchIndex?: number | string
+    }) => {
+      const batchSize = Number(options.batchSize ?? 10)
+      const batchIndex = Number(options.batchIndex ?? 0)
+      await runJsonTestcaseBatch({
+        sessionId: options.session,
+        jsonPath: options.jsonPath || '',
+        outDir: options.outDir,
+        batchSize,
+        batchIndex,
+        host: options.host,
+        token: options.token,
+      })
+    },
+  )
 
 cli
   .command(

@@ -38,6 +38,25 @@ import { createRecordingApi } from './screen-recording.js'
 import { createDemoVideo } from './ffmpeg.js'
 import { type GhostCursorClientOptions } from './ghost-cursor.js'
 import { RecordingGhostCursorController } from './recording-ghost-cursor.js'
+import {
+  createTestScriptBuilder,
+  materializePytestProject,
+  normalizeDefaultTestName,
+  type AssertionInput,
+  type RecordedActionStep,
+  type RecordedAssertionStep,
+  type RecordedStep,
+  type TestBuilderStatus,
+} from './test-script-builder.js'
+import {
+  mergeJsonBatchRunOptions,
+  parseJsonTestcaseFile,
+  resolveBatchSlice,
+  resolveCaseTestName,
+  resolveGroupedOutDir,
+  type JsonBatchRunOptions,
+  type JsonTestcase,
+} from './json-testcase-batch.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -198,6 +217,48 @@ export interface ExecuteResult {
   isError: boolean
 }
 
+export interface ExportPythonTestResult {
+  outDir: string
+  testFilePath: string
+  requirementsPath: string
+  readmePath: string
+  files: string[]
+  stepCount: number
+  scenarioName: string
+  testName: string
+}
+
+export interface JsonTestcaseExecutionResult {
+  caseIndex: number
+  caseId: string | null
+  caseName: string | null
+  testName: string
+  status: 'passed' | 'failed'
+  stepCount: number
+  testFilePath: string | null
+  error: string | null
+}
+
+export interface RunJsonTestcaseBatchResult {
+  jsonPath: string
+  outDir: string
+  batchSize: number
+  batchIndex: number
+  batchStartIndex: number
+  totalCases: number
+  processedCases: number
+  passedCases: number
+  failedCases: number
+  results: JsonTestcaseExecutionResult[]
+}
+
+export interface JsonTestcaseBatchDefaults {
+  jsonPath?: string
+  outDir?: string
+  batchSize?: number
+  batchIndex?: number
+}
+
 interface WarningEvent {
   id: number
   message: string
@@ -273,13 +334,16 @@ export class PlaywrightExecutor {
   private logger: ExecutorLogger
   private sessionMetadata: SessionMetadata
   private hasWarnedExtensionOutdated = false
+  private cwd: string
+  private testScriptBuilder = createTestScriptBuilder()
+  private jsonTestcaseBatchDefaults: JsonTestcaseBatchDefaults = {}
 
   constructor(options: ExecutorOptions) {
     this.cdpConfig = options.cdpConfig
     this.logger = options.logger || { log: console.log, error: console.error }
     this.sessionMetadata = options.sessionMetadata || { extensionId: null, browser: null, profile: null }
-    // ScopedFS expects an array of allowed directories. If cwd is provided, use it; otherwise use defaults.
-    this.scopedFs = new ScopedFS(options.cwd ? [options.cwd, '/tmp', os.tmpdir()] : undefined)
+    this.cwd = options.cwd || process.cwd()
+    this.scopedFs = new ScopedFS([this.cwd, '/tmp', os.tmpdir()])
     this.sandboxedRequire = this.createSandboxedRequire(require)
   }
 
@@ -654,6 +718,7 @@ export class PlaywrightExecutor {
 
     this.clearConnectionState()
     this.clearUserState()
+    this.testScriptBuilder.reset()
 
     // Check extension status first to provide better error messages
     const extensionStatus = await this.checkExtensionStatus()
@@ -694,6 +759,343 @@ export class PlaywrightExecutor {
     this.isConnected = true
 
     return { page, context }
+  }
+
+  getTestBuilderStatus(): TestBuilderStatus {
+    return this.testScriptBuilder.status()
+  }
+
+  resetTestBuilder(): void {
+    this.testScriptBuilder.reset()
+  }
+
+  getJsonTestcaseBatchDefaults(): JsonTestcaseBatchDefaults {
+    return { ...this.jsonTestcaseBatchDefaults }
+  }
+
+  configureJsonTestcaseBatchDefaults(options: {
+    jsonPath?: string
+    outDir?: string
+    batchSize?: number
+    batchIndex?: number
+    reset?: boolean
+  } = {}): JsonTestcaseBatchDefaults {
+    if (options.reset) {
+      this.jsonTestcaseBatchDefaults = {}
+    }
+
+    const normalizedJsonPath = options.jsonPath?.trim()
+    if (normalizedJsonPath !== undefined) {
+      this.jsonTestcaseBatchDefaults.jsonPath = normalizedJsonPath || undefined
+    }
+
+    const normalizedOutDir = options.outDir?.trim()
+    if (normalizedOutDir !== undefined) {
+      this.jsonTestcaseBatchDefaults.outDir = normalizedOutDir || undefined
+    }
+
+    if (options.batchSize !== undefined) {
+      if (!Number.isInteger(options.batchSize) || options.batchSize <= 0) {
+        throw new Error('batchSize must be a positive integer.')
+      }
+      this.jsonTestcaseBatchDefaults.batchSize = options.batchSize
+    }
+
+    if (options.batchIndex !== undefined) {
+      if (!Number.isInteger(options.batchIndex) || options.batchIndex < 0) {
+        throw new Error('batchIndex must be an integer >= 0.')
+      }
+      this.jsonTestcaseBatchDefaults.batchIndex = options.batchIndex
+    }
+
+    return this.getJsonTestcaseBatchDefaults()
+  }
+
+  private resolveRuntimeUrl(options: { baseUrl?: string; url: string }): string {
+    const { baseUrl, url } = options
+    if (!baseUrl) {
+      return url
+    }
+
+    try {
+      return new URL(url, baseUrl).toString()
+    } catch {
+      return url
+    }
+  }
+
+  private getAssertionInput(step: RecordedStep): AssertionInput | null {
+    if (step.action === 'assert-url') {
+      return {
+        type: 'url',
+        expectedUrl: step.expectedUrl,
+      }
+    }
+
+    if (step.action === 'assert-visible') {
+      return {
+        type: 'visible',
+        locator: step.locator,
+      }
+    }
+
+    if (step.action === 'assert-text') {
+      return {
+        type: 'text',
+        locator: step.locator,
+        expectedText: step.expectedText,
+      }
+    }
+
+    return null
+  }
+
+  private isAssertionStep(step: RecordedStep): step is RecordedAssertionStep {
+    return step.action === 'assert-url' || step.action === 'assert-visible' || step.action === 'assert-text'
+  }
+
+  private normalizeComparableUrl(urlValue: string): string {
+    try {
+      return new URL(urlValue).toString()
+    } catch {
+      return urlValue
+    }
+  }
+
+  private async runRecordedStepOnPage(options: {
+    page: Page
+    step: RecordedStep
+    baseUrl?: string
+  }): Promise<void> {
+    const { page, step, baseUrl } = options
+
+    if (step.action === 'goto') {
+      const resolvedUrl = this.resolveRuntimeUrl({ baseUrl, url: step.url })
+      await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded' })
+      return
+    }
+
+    if (step.action === 'click') {
+      await page.locator(step.locator).click()
+      return
+    }
+
+    if (step.action === 'fill') {
+      await page.locator(step.locator).fill(step.value)
+      return
+    }
+
+    if (step.action === 'press') {
+      await page.locator(step.locator).press(step.key)
+      return
+    }
+
+    if (step.action === 'check') {
+      await page.locator(step.locator).check()
+      return
+    }
+
+    if (step.action === 'uncheck') {
+      await page.locator(step.locator).uncheck()
+      return
+    }
+
+    if (step.action === 'select') {
+      await page.locator(step.locator).selectOption(step.value)
+      return
+    }
+
+    if (step.action === 'assert-url') {
+      const currentUrl = this.normalizeComparableUrl(page.url())
+      const expectedUrl = this.normalizeComparableUrl(step.expectedUrl)
+      if (currentUrl !== expectedUrl) {
+        throw new Error(`assert-url failed: expected "${expectedUrl}" but got "${currentUrl}".`)
+      }
+      return
+    }
+
+    if (step.action === 'assert-visible') {
+      await page.locator(step.locator).first().waitFor({ state: 'visible' })
+      return
+    }
+
+    const locator = page.locator(step.locator).first()
+    await locator.waitFor({ state: 'attached' })
+    const textContent = await locator.innerText()
+    if (!textContent.includes(step.expectedText)) {
+      throw new Error(
+        `assert-text failed: locator "${step.locator}" does not contain "${step.expectedText}". Actual: "${textContent}".`,
+      )
+    }
+  }
+
+  private readJsonTestcases(options: { jsonPath: string }): { jsonPath: string; cases: JsonTestcase[] } {
+    const resolvedJsonPath = (() => {
+      if (path.isAbsolute(options.jsonPath)) {
+        return options.jsonPath
+      }
+      return path.resolve(this.cwd, options.jsonPath)
+    })()
+
+    const content = this.scopedFs.readFileSync(resolvedJsonPath, 'utf-8')
+    const parsed = parseJsonTestcaseFile({
+      sourcePath: resolvedJsonPath,
+      content,
+    })
+
+    return {
+      jsonPath: resolvedJsonPath,
+      cases: parsed.cases,
+    }
+  }
+
+  exportPythonTest(options: { outDir?: string; testName?: string } = {}): ExportPythonTestResult {
+    const status = this.testScriptBuilder.status()
+    if (!status.started || !status.name) {
+      throw new Error('Cannot export test: no recorded scenario. Call testBuilder.start(...) first.')
+    }
+    if (status.stepCount === 0) {
+      throw new Error('Cannot export test: scenario has no recorded steps.')
+    }
+
+    const defaultTestName = normalizeDefaultTestName({ value: options.testName || status.name })
+    const scriptContent = this.testScriptBuilder.renderPython({ testName: defaultTestName })
+    const resolvedOutDir = (() => {
+      if (!options.outDir) {
+        return path.resolve(this.cwd, 'generated-regression')
+      }
+
+      if (path.isAbsolute(options.outDir)) {
+        return options.outDir
+      }
+
+      return path.resolve(this.cwd, options.outDir)
+    })()
+
+    const materialized = materializePytestProject({
+      outDir: resolvedOutDir,
+      testName: defaultTestName,
+      scriptContent,
+      fileSystem: this.scopedFs,
+    })
+
+    return {
+      ...materialized,
+      stepCount: status.stepCount,
+      scenarioName: status.name,
+      testName: defaultTestName,
+    }
+  }
+
+  async runJsonTestcaseBatch(options: JsonBatchRunOptions = {}): Promise<RunJsonTestcaseBatchResult> {
+    const mergedOptions = mergeJsonBatchRunOptions({
+      defaults: this.jsonTestcaseBatchDefaults as JsonBatchRunOptions,
+      overrides: options,
+    })
+    await this.ensureConnection()
+    const page = await this.getCurrentPage(10000)
+    const context = this.context || page.context()
+
+    const parsed = this.readJsonTestcases({ jsonPath: mergedOptions.jsonPath })
+    const batchSize = mergedOptions.batchSize
+    const batchIndex = mergedOptions.batchIndex
+    const batch = resolveBatchSlice({
+      cases: parsed.cases,
+      batchSize,
+      batchIndex,
+    })
+    const groupedOutDir = resolveGroupedOutDir({
+      cwd: this.cwd,
+      jsonPath: parsed.jsonPath,
+      outDir: mergedOptions.outDir,
+    })
+
+    const results: JsonTestcaseExecutionResult[] = []
+    const processedCases = batch.items.length
+
+    for (const [offset, testCase] of batch.items.entries()) {
+      const caseIndex = batch.startIndex + offset
+      const casePage = await context.newPage()
+      const testName = resolveCaseTestName({ testCase, caseIndex })
+
+      try {
+        this.testScriptBuilder.reset()
+        this.testScriptBuilder.start({
+          name: testCase.name || testName,
+          baseUrl: testCase.baseUrl,
+        })
+
+        for (const step of testCase.steps) {
+          if (this.isAssertionStep(step)) {
+            const assertionInput = this.getAssertionInput(step)
+            if (!assertionInput) {
+              throw new Error(`Unsupported assertion step: ${step.action}`)
+            }
+            this.testScriptBuilder.assert(assertionInput)
+          } else {
+            this.testScriptBuilder.step(step)
+          }
+          await this.runRecordedStepOnPage({
+            page: casePage,
+            step,
+            baseUrl: testCase.baseUrl,
+          })
+        }
+
+        const exported = this.exportPythonTest({
+          outDir: groupedOutDir,
+          testName,
+        })
+
+        results.push({
+          caseIndex,
+          caseId: testCase.id || null,
+          caseName: testCase.name || null,
+          testName,
+          status: 'passed',
+          stepCount: testCase.steps.length,
+          testFilePath: exported.testFilePath,
+          error: null,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        results.push({
+          caseIndex,
+          caseId: testCase.id || null,
+          caseName: testCase.name || null,
+          testName,
+          status: 'failed',
+          stepCount: testCase.steps.length,
+          testFilePath: null,
+          error: message,
+        })
+      } finally {
+        this.testScriptBuilder.reset()
+        try {
+          await casePage.close()
+        } catch (closeError) {
+          this.logger.error('Failed to close batch testcase page:', closeError)
+        }
+      }
+    }
+
+    const passedCases = results.filter((result) => {
+      return result.status === 'passed'
+    }).length
+    const failedCases = results.length - passedCases
+
+    return {
+      jsonPath: parsed.jsonPath,
+      outDir: groupedOutDir,
+      batchSize,
+      batchIndex,
+      batchStartIndex: batch.startIndex,
+      totalCases: parsed.cases.length,
+      processedCases,
+      passedCases,
+      failedCases,
+      results,
+    }
   }
 
   async execute(code: string, timeout = 10000): Promise<ExecuteResult> {
@@ -1035,6 +1437,27 @@ export class PlaywrightExecutor {
         },
       })
 
+      const testBuilderApi = {
+        start: (options: { name?: string; baseUrl?: string }) => {
+          return this.testScriptBuilder.start(options)
+        },
+        step: (step: RecordedActionStep) => {
+          return this.testScriptBuilder.step(step)
+        },
+        assert: (assertion: AssertionInput) => {
+          return this.testScriptBuilder.assert(assertion)
+        },
+        status: () => {
+          return this.testScriptBuilder.status()
+        },
+        reset: () => {
+          this.testScriptBuilder.reset()
+        },
+        exportPython: (options?: { outDir?: string; testName?: string }) => {
+          return this.exportPythonTest(options || {})
+        },
+      }
+
       // Ghost Browser API - creates chrome object that mirrors Ghost Browser's APIs
       // See extension/src/ghost-browser-api.d.ts for full API documentation
       const chromeGhostBrowser = createGhostBrowserChrome(async (namespace, method, args) => {
@@ -1079,6 +1502,7 @@ export class PlaywrightExecutor {
           isRecording: recordingApi.isRecording,
           cancel: recordingApi.cancel,
         },
+        testBuilder: testBuilderApi,
         // Backward-compatible aliases
         startRecording: recordingApi.start,
         stopRecording: recordingApi.stop,

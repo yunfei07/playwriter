@@ -1,11 +1,55 @@
 # Changelog
 
+## 0.0.82
+
+### Features
+
+- **Configurable JSON batch defaults for Agent workflows**: Added MCP tool `configure_json_testcase_batch_defaults` to persist `jsonPath`, `outDir`, `batchSize`, and `batchIndex` in-session so repeated `run_json_testcase_batch` calls can omit repeated parameters.
+- **run_json_testcase_batch now supports default fallback**: Batch execution arguments can now be partially provided; missing values are resolved from configured defaults, with built-in fallback to `batchSize=10` and `batchIndex=0`.
+
+### Docs
+
+- **Document one-time default configuration flow**: Updated skill docs with a configure-once then run-by-index workflow for large regression suites.
+
+### Tests
+
+- **Add merge/default option tests**: Extended `json-testcase-batch.test.ts` to validate option merge behavior and required `jsonPath` enforcement after merge.
+
+## 0.0.81
+
+### Features
+
+- **Add JSON testcase batch runner with per-case Python export**: New executor flow runs structured JSON testcases in batches (default 10), executes each case in a dedicated page, and exports one pytest + Playwright script per testcase.
+- **New MCP tool `run_json_testcase_batch`**: Added tool to process a specific JSON batch with `jsonPath`, `batchSize`, `batchIndex`, and `outDir`, returning pass/fail details per testcase.
+- **New CLI command `playwriter test run-json`**: Added CLI wrapper for batch execution and export with stable batch controls for large regression suites.
+
+### Docs
+
+- **Document JSON batch workflow in skill instructions**: Added JSON format, supported actions/assertions, MCP usage, CLI usage, and grouped output layout (`<outDir>/<json-file-name>/tests/test_<case_id>.py`).
+
+### Tests
+
+- **Add parser and batching unit tests**: New `json-testcase-batch.test.ts` validates testcase schema parsing, deterministic 10-case batching, grouped outDir resolution, and per-case naming fallbacks.
+- **Extend security coverage to new privileged route**: Added token middleware checks for `/cli/test/run-json`.
+
 ## 0.0.80
 
 ### Improvements
 
 - **Descriptive click timeout errors**: When `locator.click()` times out due to actionability failures, the error now includes the reason (e.g. "Element is not visible", "Element is not stable", "<button> intercepts pointer events") instead of just "Timeout exceeded."
 - **Faster action timeouts for agents**: Default Playwright action timeout reduced from 10s to 2s. Navigation timeout remains at 10s. Agents now get fast failure with descriptive errors instead of waiting 10 seconds for a generic timeout.
+
+### Features
+
+- **Add explicit Python regression export flow**: New `testBuilder` API in execute context (`start/step/assert/status/reset/exportPython`) plus MCP tool `export_python_test` and CLI command `playwriter test export` to generate runnable `pytest + playwright sync API` projects from recorded steps.
+
+### Security
+
+- **Extend token-route coverage to test export endpoint**: Added security regression assertions for `/cli/test/export` so token mode protections are verified on the new privileged route.
+
+### Tests
+
+- **Add script builder unit tests and MCP export integration test**: Added test coverage for Python script rendering, project materialization, and end-to-end export through MCP.
 
 ## 0.0.79
 

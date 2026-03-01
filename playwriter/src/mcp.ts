@@ -241,6 +241,199 @@ server.tool(
 )
 
 server.tool(
+  'export_python_test',
+  dedent`
+    Export the recorded testBuilder scenario for this MCP session as a runnable Python Playwright regression test project.
+
+    This tool requires previous execute calls that use:
+    - testBuilder.start(...)
+    - testBuilder.step(...)
+    - testBuilder.assert(...)
+
+    Export is explicit by design: it never auto-generates tests unless this tool is called.
+  `,
+  {
+    outDir: z
+      .string()
+      .optional()
+      .describe('Output directory. Relative paths resolve from current working directory. Default: ./generated-regression'),
+    testName: z
+      .string()
+      .optional()
+      .describe('Test name used for generated file/function names. Default: scenario name from testBuilder.start'),
+  },
+  async ({ outDir, testName }) => {
+    try {
+      const exec = await getOrCreateExecutor()
+      const exported = exec.exportPythonTest({ outDir, testName })
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Python regression test exported.\n` +
+              `outDir: ${exported.outDir}\n` +
+              `testFilePath: ${exported.testFilePath}\n` +
+              `requirementsPath: ${exported.requirementsPath}\n` +
+              `readmePath: ${exported.readmePath}\n` +
+              `stepCount: ${exported.stepCount}\n` +
+              `scenarioName: ${exported.scenarioName}\n` +
+              `testName: ${exported.testName}`,
+          },
+        ],
+      }
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      return {
+        content: [{ type: 'text', text: `Failed to export python test: ${message}` }],
+        isError: true,
+      }
+    }
+  },
+)
+
+server.tool(
+  'configure_json_testcase_batch_defaults',
+  dedent`
+    Configure default arguments for run_json_testcase_batch in this MCP session.
+
+    After configuring, run_json_testcase_batch can omit repeated arguments and only pass batchIndex when needed.
+    - Defaults are stored in-memory for this MCP session.
+    - Set reset=true to clear all saved defaults.
+  `,
+  {
+    jsonPath: z
+      .string()
+      .optional()
+      .describe('Default testcase JSON path. Relative paths resolve from current working directory.'),
+    outDir: z.string().optional().describe('Default output root directory.'),
+    batchSize: z.number().int().positive().optional().describe('Default batch size.'),
+    batchIndex: z.number().int().min(0).optional().describe('Default batch index.'),
+    reset: z.boolean().default(false).describe('Reset all existing defaults before applying provided values.'),
+  },
+  async ({ jsonPath, outDir, batchSize, batchIndex, reset }) => {
+    try {
+      const exec = await getOrCreateExecutor()
+      const defaults = exec.configureJsonTestcaseBatchDefaults({
+        jsonPath,
+        outDir,
+        batchSize,
+        batchIndex,
+        reset,
+      })
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `JSON batch defaults updated.\n` +
+              `jsonPath: ${defaults.jsonPath || '(unset)'}\n` +
+              `outDir: ${defaults.outDir || '(unset)'}\n` +
+              `batchSize: ${defaults.batchSize ?? '(unset -> 10)'}\n` +
+              `batchIndex: ${defaults.batchIndex ?? '(unset -> 0)'}`,
+          },
+        ],
+      }
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      return {
+        content: [{ type: 'text', text: `Failed to configure json batch defaults: ${message}` }],
+        isError: true,
+      }
+    }
+  },
+)
+
+server.tool(
+  'run_json_testcase_batch',
+  dedent`
+    Execute and export a batch of JSON testcases (default 10 cases per batch).
+
+    Expected JSON format:
+    - Array of cases: [ { id?, name?, baseUrl?, steps: [...] } ]
+    - Or object wrapper: { "cases": [ ... ] }
+
+    Supported step actions:
+    - goto, click, fill, press, check, uncheck, select
+    - assert-url, assert-visible, assert-text
+
+    Behavior:
+    - Runs each testcase independently in its own page
+    - Continues when one testcase fails (record-and-continue)
+    - Exports one Python file per testcase into:
+      <outDir>/<json-file-name>/tests/test_<id-or-name-or-index>.py
+  `,
+  {
+    jsonPath: z
+      .string()
+      .optional()
+      .describe('Path to JSON testcase file. Optional if configured via configure_json_testcase_batch_defaults.'),
+    outDir: z
+      .string()
+      .optional()
+      .describe('Root output directory. Uses configured default, otherwise ./generated-regression.'),
+    batchSize: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('How many testcases to process in this call. Uses configured default, otherwise 10.'),
+    batchIndex: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Zero-based batch index. Uses configured default, otherwise 0.'),
+  },
+  async ({ jsonPath, outDir, batchSize, batchIndex }) => {
+    try {
+      const exec = await getOrCreateExecutor()
+      const result = await exec.runJsonTestcaseBatch({
+        jsonPath,
+        outDir,
+        batchSize,
+        batchIndex,
+      })
+
+      const lines = result.results.map((item) => {
+        const label = item.status === 'passed' ? 'PASS' : 'FAIL'
+        const caseLabel = item.caseId || item.caseName || `case-${item.caseIndex + 1}`
+        const detail = item.status === 'passed' ? item.testFilePath || '' : item.error || ''
+        return `- [${label}] #${item.caseIndex + 1} (${caseLabel}) ${detail}`
+      })
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `JSON testcase batch finished.\n` +
+              `jsonPath: ${result.jsonPath}\n` +
+              `outDir: ${result.outDir}\n` +
+              `batchIndex: ${result.batchIndex}\n` +
+              `batchSize: ${result.batchSize}\n` +
+              `batchStartIndex: ${result.batchStartIndex}\n` +
+              `totalCases: ${result.totalCases}\n` +
+              `processedCases: ${result.processedCases}\n` +
+              `passedCases: ${result.passedCases}\n` +
+              `failedCases: ${result.failedCases}\n` +
+              (lines.length > 0 ? `results:\n${lines.join('\n')}` : 'results:\n- (no cases in this batch range)'),
+          },
+        ],
+      }
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      return {
+        content: [{ type: 'text', text: `Failed to run json testcase batch: ${message}` }],
+        isError: true,
+      }
+    }
+  },
+)
+
+server.tool(
   'reset',
   dedent`
     Recreates the CDP connection and resets the browser/page/context. Use this when the MCP stops responding, you get connection errors, if there are no pages in context, assertion failures, page closed, or other issues.
